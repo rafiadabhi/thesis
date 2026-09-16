@@ -1,22 +1,14 @@
-# Dokumen kerja dan template
-/Template/
-/Proposal/
-/Full_Text/
-/Full Text/
-/Bimbingan/
-/Supervision/
+/template/
+/proposal/
+/full_text/
 
-# Data satelit dan hasil olahan
-/Data/raw/
-/Data/processed/
-*.nc
-*.nc4
-*.h5
-*.hdf
-*.tif
-*.tiff
+/data/raw/
+/data/processed/
+/output/
 
-# Python
+/syntax/rmd/*.html
+/syntax/rmd/*_files/
+
 .venv*/
 __pycache__/
 *.py[cod]
@@ -24,12 +16,15 @@ __pycache__/
 .netrc
 _netrc
 
-# R
+*.nc
+*.nc4
+*.h5
+*.hdf
+*.tif
+*.tiff
+
 .Rhistory
 .RData
 .Rproj.user/
-*_files/
-
-# Sistem
 Thumbs.db
 .DS_Store
