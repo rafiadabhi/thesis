@@ -1,0 +1,508 @@
+---
+title: "Mask Grid Selat Sunda"
+author: "Rafi Adabhi Sunarya"
+date: "2026-09-13"
+output: html_document
+---
+
+```{r setup}
+cfg <- list(
+  west = 103, east = 107, south = -8, north = -5,
+  coastline_file = "",
+  install_missing_packages = FALSE, write_outputs = TRUE,
+  grid_step_deg = 0.25, selection_rule = "center",
+  area_tolerance_m2 = 1, full_sea_tolerance = 1e-6
+)
+
+needed <- c("sf", "ggplot2", "jsonlite", "knitr")
+missing <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing) && isTRUE(cfg$install_missing_packages)) {
+  options(timeout = max(300, getOption("timeout", 60)))
+  install.packages(missing, repos = "https://cloud.r-project.org")
+}
+missing <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing)) {
+  stop("Paket belum tersedia: ", paste(missing, collapse = ", "),
+       ". Jalankan di Console: install.packages(c(",
+       paste(shQuote(missing), collapse = ", "),
+       "), repos = 'https://cloud.r-project.org'). Lalu Knit kembali.", call. = FALSE)
+}
+if (utils::packageVersion("sf") < "1.0.0") {
+  stop("Gunakan sf versi 1.0.0 atau lebih baru.", call. = FALSE)
+}
+if (utils::packageVersion("ggplot2") < "3.4.0") {
+  stop("Perbarui ggplot2 ke versi 3.4.0 atau lebih baru di Console.", call. = FALSE)
+}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                     error = FALSE, fig.width = 8, fig.height = 6, dpi = 150)
+options(digits = 15)
+
+input_name <- knitr::current_input(dir = TRUE)
+project_dir <- if (length(input_name) == 1L && !is.na(input_name) && nzchar(input_name)) {
+  dirname(normalizePath(input_name, winslash = "/", mustWork = TRUE))
+} else getwd()
+
+stopifnot(is.numeric(cfg$west), is.numeric(cfg$east),
+          is.numeric(cfg$south), is.numeric(cfg$north),
+          cfg$west < cfg$east, cfg$south < cfg$north,
+          is.numeric(cfg$grid_step_deg), cfg$grid_step_deg > 0,
+          cfg$area_tolerance_m2 > 0,
+          cfg$full_sea_tolerance > 0, cfg$full_sea_tolerance < 0.01)
+bounds <- c(west = cfg$west, east = cfg$east,
+            south = cfg$south, north = cfg$north)
+if (any(!is.finite(bounds))) stop("Koordinat harus berupa angka terhingga.")
+if (cfg$west < -180 || cfg$east > 180 ||
+    cfg$south < -85 || cfg$north > 85) {
+  stop("Domain di luar rentang yang didukung skrip lokal ini.")
+}
+
+step_deg <- cfg$grid_step_deg
+global_nlon <- as.integer(round(360 / step_deg))
+global_nlat <- as.integer(round(180 / step_deg))
+if (abs(global_nlon * step_deg - 360) > 1e-10 ||
+    abs(global_nlat * step_deg - 180) > 1e-10) {
+  stop("grid_step_deg harus membagi 360 dan 180 tanpa sisa.")
+}
+if (!cfg$selection_rule %in% c("center", "majority", "any")) {
+  stop("selection_rule harus berupa 'center', 'majority', atau 'any'.")
+}
+area_crs <- 6933L # proyeksi equal-area, luas dalam meter persegi
+area_tol <- cfg$area_tolerance_m2
+ratio_tol <- cfg$full_sea_tolerance
+
+edge_units <- c((cfg$west + 180) / step_deg,
+                (cfg$east + 180) / step_deg,
+                (90 - cfg$north) / step_deg,
+                (90 - cfg$south) / step_deg)
+if (any(abs(edge_units - round(edge_units)) > 1e-7)) {
+  stop("Batas harus berimpit dengan tepi grid analisis sebesar ", step_deg, " derajat.",
+       call. = FALSE)
+}
+coast_is_embedded <- !nzchar(cfg$coastline_file)
+same_domain <- max(abs(bounds - c(west=103, east=107, south=-8, north=-5))) < 1e-10
+default_check <- same_domain && coast_is_embedded && abs(step_deg - 0.25) < 1e-10 &&
+  identical(cfg$selection_rule, "center") &&
+  isTRUE(all.equal(area_tol, 1)) && isTRUE(all.equal(ratio_tol, 1e-6))
+```
+
+# Parameter
+
+```{r parameter-table}
+knitr::kable(data.frame(
+  Parameter = c("Batas barat", "Batas timur", "Batas selatan", "Batas utara",
+                "Resolusi grid", "Aturan grid laut"),
+  Nilai = c(paste0(bounds["west"], "° BT"), paste0(bounds["east"], "° BT"),
+            paste0(abs(bounds["south"]), "° LS"), paste0(abs(bounds["north"]), "° LS"),
+            "0,25° × 0,25°", "Titik pusat berada di laut"),
+  stringsAsFactors = FALSE
+), align = c("l", "l"))
+```
+
+```{r coastline-snapshot, include=FALSE}
+coast_b64 <- paste0(
+  "H4sIAAAAAAACA41dWY4lO27dyvvsB7QTGihKWoFhoO32h/3h/W/E5zDihkjGra7XsOF2FlOhgcPhmP/5v//4n//473/+4//+/Z//",
+  "9cff/va3WsZPnUNUu7SC/4w//k1/xuq19Nraxn9E/v6HkfVWdtFdSdZJpk3XGjqFZE1vslZqm6uUQ9bLxheWkcm+yerUpX3LIaut",
+  "k2LGj849SlF9yMaavcvaRtv6TbaWrImDHDKZ2moflWRl3WR7rFr9R8cYtayOHXK1NS66VqTWFpcbFRuTYct9yOoYS+dyZH2t3toi",
+  "1R73UVsbY+sYxZHh5GUtu99a5ENn/99qfrm6apNwJa33MfHjep6rVxxhbDur1JsM79lHH7baNLK2pA6Nr9r4yyJyXnW02XB3doTn",
+  "VZtKnWXq9mS7zS7xozq0D63dXXDvuDnVSNaXjCbrHAFPuYoksqGlt+nItOFC5hwzXhx4oW7Reeik74mnXZ5JWsOd4HDnflV2xzer",
+  "HbZ9vlr60oW7O2QTu8BHIsvhF4Qs48jWKppeq+KRcQWtPs+gE4/QpdjeHv4dkKxW5lkM/CJgJY38ixeNF9JVR82PVcCZ4FIngg3n",
+  "nLOMwOa8HvBH3U4Gwc04gT1qk/HLM4AVXuLwWz3y559//+NSOaIFvwtReb5cRfGqSUnIAMe1+yRiZOCtt+QIhWv2ce6lzl7x79We",
+  "7EPVBatDkg+VTny1Dv8U0npp4At1VL1U6hfPJVKFz1DlkA1w15YWtCHIVoEMDH9QHKilpxDccQOVODocs4Mj/BVLW31DKMq5EJwd",
+  "mkrsQvSzub6adM/CtS+ciL/tTioVWkNWP0foWH3MccnD/JCtOuv1qh+yiYvFbccjDChWyO54uATqd9S6Z+DhL2/6fbnfscjhJsg6",
+  "ZcpZprK0Vqima8l2rYjtNVA6+Yc92y+N2CeYeOFOz3kLbqmpvT9+4yZT6Nwpnk9oHpNg45+7BktSIZqrzCjYeIYJvnBaGItpz8+P",
+  "paiYnIXgL4BfEzf1CUq82X6eoiyZ/fXVNbqQ+Q+Zahvz0ulbPmdYuG0YhHLIoF1g3tQ2V5/rhVnu2/FJ0SG4oDo9b/ZleqidG6Hk",
+  "ltKSUoeY43dql/PVCU1Sk7bGP8NyyJyObEHGVzLpv+WRw07Q9dtz3viBDR5g0RYYAE8BjHCuBWQFN5AvGTuoSqjzrDY39ToeMWCJ",
+  "bQbluT2uBu0CEV1OhbWt4N/1GHVSNYXVjFqHGswbRJ6gqLQa1WsvsrQATzkyhc4EfDOy+SGDEK+p4shwPQuqzU6gzxEg0NjgOPfW",
+  "RN+SDRsOlgCMOevxBbG9aP0BLoRw7SyH2wCYumDi+WzfwATlUetcDqgGBi+wZyP7Ow1Lsg6LVVUiWMPtKsHIIWtzTtxLeFU8YJ1t",
+  "uNUajDNkNmE6WL9aD0S0O5l4+rQ5AWjSA/14xUO/IB0Bm+jBfqRbkHa8ZGBNwFpguvD+8xKfYNgbFSp/3zEdpLjUdNjfCcRHdgRP",
+  "BEQiN/wX43bc0oioiGR7LgdkQIbl94KJPgxqq+EUVYv7MO8TP3fnEPIPxGQ8QIa3jIeeF+Od5YB1oI+99FQirOnxukA+Mx/PZTbL",
+  "o1OQAQIVh4p41JoxDMkqbjkcFSdKmI1k2NgAmDurYZ+SbwQfBc+BWc5qcFVA5NEJyOCW7MAAFK9WLjZ5PgplBa/pmB1+FKBzliCx",
+  "vDicXL2qI2O+75eSIs0xO8QG6lm3w4l/gUecKobugRP0QMrxA73ZC/2pyMjJxSIdDw9P1EMZsD+1/mNTSLboTM3oEwEHRXbCm0IZ",
+  "vxQZBBb28nFOf7m7QjeuLj2nmJP/ntzJYs5jm2d3UPb7ZcrAcYAsY7tLoYu9lwZD2/iw9b4Uu2bFAQBSt3jrTpMKyOIMD84D2NqT",
+  "fYJTC0+u70M2yEilR18XOhWYYh6hAKKAGl/Njiq/1NkwYgVnHVGPdcgDYMxyZGDYkfXT+6OQV/ykBCD7e2b6MF6DjYKnBZCynyWF",
+  "LwBw6xUy6F5ii7NOALLAKqAbFrVwKhT7hb+3xUFUkEHbwe1zYAEIAHgvkYGtdQe9CC0BUxZgQAO8XXCEpR15vCInQVlgNRgk6OJ6",
+  "VsNbK82n8+1BNqmPvLEgGMV7eNWOI5j1mI6L2+JvBrXYyE+NEGievcHJGjHoxAuB4Qqmpxewa4z/8HoB74LVhrUHL80eTgpIsbsL",
+  "OoHsbQD4+HAAppfr3gwEeU+mET4VoVl9Toq7zlEMkEHsvM9GGF8hOCFu1uidYLP4b2e1SZhdPd5twLvgNZkX8FjGIaVfNsBfSIbF",
+  "5mFSqSW+7OAQAJ7m+BLgEUeKb98hxYx2lX/Nl9D0xHtOccIpxM3pjmTAQHt6BSbUEvkM0DVgze5lBg8A1NbTGWDEwPzu5uCtwftX",
+  "j+xAhkfUiUs5ZOB7jWgXZFBX84MTrwtWqEfNZyD0DyABq+2kNkFWO3fRj+r/Tgam2QHrCqzS0D6d/QJjglO9N2mrzYGH2UG2tuk4",
+  "x79gBCyokZV+r+OOIQZYg0wfx0N+CHXsKF79A0/hKeYDiwVK960OSQc4gt+ah25CFLEV7zzDzSgwdo/kCO6p0NTHuB7YECeFPn0W",
+  "szfMHhZgR/HHBdnohIndB0UAB/A4UOJnMRxqvVxsqKqgv4RyuK//cb7Topsgh01AVhldTg4bFHIlpjv3Ju3yrkIwEY74JIpwZAP2",
+  "jFo+XMimmLQnWEsyKENIfzrDJlccqSadQBmkSCfEUJtDiSQDD44UrYVHRq328DDIYIRfcekFowQpcixyxYjSa0HaGK9zH+X38Kwx",
+  "tg4GAepZj1CDTL85TpBgsKp//AG/vMNmBIAI2x3SDfIDvw87GzEOsxjoGf6oWnFnKwBdbm6QG+q5X2LSDbkePi6F1STKFuAhmTp6",
+  "62vR7/GvBW37DoiA46BMt5MGwnSqvSBasD4SXuG7rw7TDYsDT+LZG2wv9t81fBRyC/lb83AcTg2FG+yDPSrTJY+bCzKB2O/kg4N/",
+  "eeflPBasRU0OmAnNwOOXA3BBjcVT+iUfFWSQwdnTY8EvgJIrznZVZjMIGaNA59Xgj/bxSiFBJuHjeQxhTjkeNmgb3HhbHpICygJo",
+  "1RRGoNGDjD/PwDAazFl/fbUDFpZgzt/Gi2Tg13AI2RVYdLQQ+Fl8e+Ly56ujE7Mnr+rt9jG890pevM+gOOybf5M2p6MBLfVKXjAS",
+  "sJxwDYoD2FXTe8HjAcbvzieFGGVxmISFUKuHlcBbA6Ik0ZODWMJP1X3OABT7Jdo4ITKwjG5zEJr2clxmSuWZLug1xZBhZUNw2ARE",
+  "8c5RjcCR5285qAFt9iWwTod/u+QALSPubaV072Ros6ZAGEXCYw26UNxW9TdCqw3dHW+OXKTVQ29sC5fXUyoHl55Y0wINQyLQwKGA",
+  "8bwHhKNWyRoYpkCr3EHa20NnAChnuGj2mD06UEgH3nAmSwjWWvhEHd671ZdigpS0JcVHI6YlmqOvPHjKcMNfM4iDDnDybr+YB6C2",
+  "5GEqsOGSGsWLiTIJr68wSnDiItIAh2wmH5wUgqXXS+HgR4mD6e3IlpT0wfKVQnGW+5qRxP023NI8hxgL79qyOadr5PP9oBsTHJtO",
+  "0WvBUs3F3oQyg0PFwMC0XIt7fQCPpjnlBz8aL7EcCwvwxCtpSTsKG+kCzQAt82VvGjXc7u7mAKqgqUeAo+AFYmfnwg+c/Z3xaQRG",
+  "4r3u8c3IEY0vphXOcrAPkhm4MWlDl/qsBoEZCSrDJ4azu5xDBZnpkuENg27F+QQkw4u0XDqQkta/2FpdFlF0ITzI7RdsC7q6gqvP",
+  "ME9/AUO4Erg57wTh6IxNlKDmcuUIyOStqb9QEaDk/Hzl5Wwf5aHgrwxGoTDhs/UQr4IZIGeGsgbmT292u09gGkmiJwJD26srMSDZ",
+  "Kq/0LMsBouWaBToz666c66f+xQvkzEGF6d7jlI3QmOkbT1cGJovnNya0e1+pfAfe8Npem0MBYAuvAOmLlSAyA8gjJPpBg/17ncR4",
+  "CyxDTuG8VzO5ymdggj2E7qCk8YtJ/+IVwGxe7OnRvQA1XAuFRZLpcxCd2DOWXADL1LWq/uuPFgbtlnprCSU1avC5hI5egfvnAvNK",
+  "q7oDw1m2BerSr/ZNmctluEOIT+HUzdJj1sBSKy4tT0kFV/agRkBWGFT0UUqa7Mr6h/BVcLWAFdXrVRjfOWLqA7gFDzHryZCwAqfX",
+  "lKhSsRCRI2PmqmqILYEMt1ZhfqcD1HjUVOZBNxEoM5yVervr6xB4/Zg2/BXdou/kLuW20TEd9OWzX6LZ9IkNCvho1Xc6haIPAVI6",
+  "BeCBIDqgA3aR5j20wUKEGeEX6GgL7jjP520h/MmpEqtgwy24RAqsCqtEPEzjcp1K0QErXNsLa5IHIFNgcHWYlLHEWIpAlpqT7pxL",
+  "L7LYpXpTTQZtNAnbwXSo6xTYEOJUoIHlzsrfWNeDuXwgdgXt5q4Yr4mfBN+LZBCpEDjEP2VwyBPs5MnBA5CkYPmu2afC3efyPbGa",
+  "vhjRhsBWclfze4MDxZojx3ULaHGs/NFBL9DHlvm+uNnMJAKjE5QYdd+ORQ1i+ZcIcbD9/dI6hslKvyIW6/YzsI1Q/MQQFryKEcjA",
+  "SDVGBRgQy6Ya0gbznS4OMDgZfnxOAVV2zGfTPYWP6hiTFR4zumgg01hDS4AwWOQQNWczEy/ea8HTW4jUv0N7q2s4KNm64qu4Ww3S",
+  "pRBw4CofR2eotsLPClEB+sAhxCtEwXsNX4JCH6tkHvkCSN9VqiDjJYWyAmyBIWQfghRafoX+d0k7WL1J8Y5y/wZgTMlLCbZaiPp6",
+  "614GRyUWCKWA8gVpjgIk30PwlmQ0HeLCJFB50JgaOQ5YCNv3AOGr5meVYk569JUrKIWxrlD0Rk+p6soKArCFno0LzmCjOQYpP6Vj",
+  "/eXdOPCkJgXRf8AFIThu6TjwdIhWgQwAp4XMGPRbhiVcDXyu4j7KLCk4M/Il9iC+6JVVMJahzHuDnhaP09obMnULTLIKwK0GXhjx",
+  "7UHGsrqANhpcuuzGgU7Iq57joD5XiqOCrOKVu2fgxvKmVLfRCeh6tDXQlnjREETvPysVRpoXwIpSDzZJBjG9Y7zXV68kW09XgiOs",
+  "4lPi9UsZA+kEuNSLDfVdMoQkw3U0n2Vl4VHKPpAMdxIAMxaeOyZaegxUryvK21tSmTxqZWDGaVawDvR0rOzoP1bs/0nI2HJ0lmKU",
+  "txNVaAvPcGWAQna6wwA1lms45EqjFUOVnc4H/Q/nABc4MRpDHyCT1WLoA2RDiD08m2OlFPW+6nWCc9PptTHp7oJLpVoUagShmXRZ",
+  "XIuIReSBDINjy48CGbsSa8b3504wjmSN/qpLYzGIxKx5PKkvxVtGBquIrUngI/yqwAK5ZOJWJlSC6gJZYajRJ4pwGfCLQra+0x4X",
+  "n3sgGaRhhZh3/zEr40J8JBMY6QAfOt2sUNZpexvJbnUGwos6L4MXsr9wpSbnEXSsIov5dZBVPLQLtjFpA2OcdRfz9KPe1V/rF7kd",
+  "kLFYT32yltkevG8NWjpDzF+tNogUj67haottGemohI3w7F2aEG+Si1I6u4FC4vz2dUe+OR6+hPwfrVgqnO50MJjUrtuRQW4gb8s/",
+  "K47efZAaZHSaJCJb0sH4OCwKOrqiUI5BKXHzNSRYDfxprOrsAAIzVImDDh51Sp2CbEawRDIguRiX6xcOcAkUko2Z6pc7oe1aLoNi",
+  "H51vrS+8uXaKOngI49f4YEx/13E8Ql5dwXFHj2eoLJw9CPgXNwfeYu3wY1blq4vRrYS93JrkznZWfCI4ep1l83urz4czAilZZ/a5",
+  "QmcVAyLAfz1UdIIM8hVl/0ukB2RYyWdt+FEWjfiYFqjaCr1L/KbUF/AidIBv0vpzH1ZXmo0DPxeFkP1eL0aCUz5YDFQPGXwNQ8r+",
+  "ERhWjTLIzoDkg/YflqiCfx8rSMcP/CEl1rhAKUk0DsJqxJWLgzYcqTJ9PQes89wpytfgmu7tvXc6awT6LVaQranEqPvkw7GLV6Kw",
+  "wYwAj4QyEljZ7Do0ejGjzuoeog4gIs2VZqn8Sr7ZfFY4bYblnOBjF4xyvSqcrLCYmnNR3XzS6az86kw1jlXdj2M/JxE0i+ZTfSiD",
+  "mDBO9WhOnBXeU4pCQ3cAbJ2YAMgg1zvWGjLVCC0X1DrAYlawf6Eq6RQwjWGg8dFPE8dgiUzsr7DiESezoKrcbCrXtzx+sVIRezaS",
+  "wRID4Ycq11GtVOK5OpJx5dzqQq+yu2pY7g2IueXl8DrDRZhJVgpMeExVDIjZcA6k/hAwzdyZlmNuRta/JGR/c3Hnislmq27XhkmH",
+  "IXslTI6zVvV0xJCONV0p3QZJU97Xaeq7kxqRowwQCg3yc1z9kglmoTtY7BFIkBngzB8F0xEDTEeGb+YsKk40fFqOZDDgLSUWYcKg",
+  "V5drnGS5R84awXqIx2E8ASPdMxZqT0uqnhSf3QfsHO7JcfDkwWcLVNhnI5h0HPz7t/q862SJA8ysbH3Yc7KRoF8i+3lX0AERs2Zz",
+  "PfzJUiQIxa2S+0U26X6pLHmWg8WCqhzdKTOQEa3qXe90rcZOCqYGbLV9keETA294ITZjT+hKRk4vFFPvjypjglB8R7CVHcK9X3c8",
+  "5k1GC7LvVic1MvZkwaLau457bwyMMQp9jsD4ct3jwhOyLrJhCLhdeWVbDRABrLovZur1JmOzDitbb/g3CZJXY32hHeGmYiOZtPkR",
+  "a/xEFvuNbga+H4HBYNDN8twHm8g3de5pDgDZtPqqCyhc37QqXRgBk5r7PhgpAd+teQ5aG/D17YJVvck6QP4nSmq3O4qOXAQCOvYL",
+  "uPpF0r36SEgGdara/HJDU5kYyGoNZdr4CaQyYcTJamuoSK3uFQo7TvuFKEa7yBgBwSH2eVNwPEzxulzcfq/GKBD0YXcfxSvQZ6z+",
+  "CNZsw4Dtc79iFaN3jqzcF1IZ/dxSz/0KDkSmufjtQwZwucZdJmZHEDV1diH/fvMb/hdyWfrhXqBjuIz1MofdXkth0bFZOMxHFmB9",
+  "JjXc9dGLymrR69ByttbZy98vo3RBE+sED046n+WV8ua0gKacx+AOCoXEpogLRdxkwrKecRfY2GqWZtrMQpqquckGe1GOY8VHxq7A",
+  "0aZX4enfdJ09aqdCwZgBFxG9SNAV+ovzkpp1f7azHfGCpp87YRMppP4KkctFx5pMubLel3CRjFUidyDnWo58D9yvRxGSDHyABY++",
+  "ZAHPpyvoeS5uBSjiMiL2qp1Zdrn9tN5usmVWr5+zMpQ6o7tBMjCJsw/k6MkqE2+5SIaHXae5bbLaQ2EFPKa3k4YeTZDBiKRuSbUu",
+  "eF83BVaFyk6BXj5XC3EyyserLoKvj8t30U8TI3DI9PFgpYg0X3tAMpXsLqsV5HP6xLm4qtbb5NtR+VVlUOIB15RKS8p6HMzVIEwu",
+  "9gIy5otiJb8yQ7DNnh3IxwgY7LF9dNwfNdwFRHbkocDyWAvk0Q8kI/JYAWi+wnOcE8Ke8DYcNmCq8Inef9icIW14V26KB+zMZGbh",
+  "YqVHWC357kGQMnwWwsZqxeIABdUBTRh12MbrucaHR/AE0Hzzo6bto43ppx00BJxeX6ulFqlP8QOSxZp1klHsQ7SPsrVgVQIUZRYh",
+  "BsiV7fkj3W9hRChk0EDWbVCEfy1W22mYQgMy4i4X0eZHYfB38HBJVosMP3IFJ+XwiJCl0lezN1+VKU8fGVA46TQgfpzCXuwkWj5S",
+  "QjIgaT0ddyR7pZWU3RqhTs9QZq71V2qgZQDFkZleCT4G6MDA4kSQdIIdlxokmimTrn4kAF5opCyrskkaGxnzX6FuUkn1oVlQWQgn",
+  "RHFABmn2AUaSmacb5RmIpRJinNki4Epll/tlke43ZUqN1tf5ZvVyJC60eq/GKpTC1OMzI2PRJdjXy8OTuzdXBnum94VZLrrOYN2w",
+  "+9j3fcAG9Tj1yLBqquYDz0P51HnYaFWignG5vuNDNsxqt0+03ci0sS/weqpP7wP0WwuMZLnlmStvd7XSPadEgHxhP0dPfR5ZnjmT",
+  "5tWqYk5NK80dQmgYymW2+qfdZrHXbutRIlDYkMl1KZsynu4HNpZuce/QrSDzurmnwyCpB5KttwuKg3G2Qqnn6i5nttbDI/Tz2PQ4",
+  "mrrNsSlpXFZwHL+Xpsbpy4VNcBjEZUEeb3twipJqdcsJSwsuHnmqx5vNaXJjWZj8Ha9e5skQTBUn+awABqKITRfsxu51uWEgTGvb",
+  "HKXj+gwbv8U6jGOR8E1m0CQVVENSoUnbOSv2yzCcfVSf8TjbmrzKmXlFGANf+jIO7aGzJvC59BxWrY2uFH/FeOrtu1q4O5tJESee",
+  "vSfVsDyo5s4Rto10lxcl2Zc2CelMd58Io63GSSiRmVgY6zsGubc262t4T2OEyE/aWqyJ1xo7xlgxx0lrM6y2X7WQwlYXSUedaW4D",
+  "W1KBf11/8i8EAhqoxPlpX1sM+p473e832WdDVht64cfr4ioT+3KBzPEM0YGbtAiynaKDIyw3gvgoOjb81ult0jsXcFUibNejyiOA",
+  "Mcdrthvz0xAR9w5USa9K9BUTSyT7VrUMllZ1dZ8mXmwfTsNMho24aX65b3PWUpE5L3iwczcfIlXhKKNqVzYozkZp1Xd5KUM+8j4r",
+  "80ouMq/faqasfHz2MNpvsnzp1ZpDl0aDlYNZojsRC2sby+qCrjYnaaZG1vcFf5naYc9KBpEzGsny7j2VwAPxdQkTAGEF9VWmm7M3",
+  "Sm07X1HvzuFOrgJAOZ7iSytNT3M2OHoO+mclhYOVQsGc/lwpytSXxV5JXyxpq5U680yhxUiYn06olJuS+nckVaaAzKLpsQFY2OTj",
+  "Ss14IWz8CEkZaqWyou361uNlm3A9tqBqX/oyODOj1+kiwCyYym7jsGiI77gwLm8Mvsf5VECLcb7il4yc9cmrLziBCBYaRokNlEBP",
+  "LekH4MdRUkc0B3+t5oPAEO8vA0wAGGAJPIdADnBHO6pza0zpfiIaeyCBsRMZ1vUlq2qgor2mDmmJLdYcdlhzNovVh62JK/blsENw",
+  "X9Y2xMUS8hj6bcIaHSx89rI1ek3NZEPPmuH1lSQX0Y3RIFlwbO4o64eKw2qoq56tCcRUCTWPr2p9WnAk7zTRtRiQA9DdFc0aH5hJ",
+  "kewGXJ+9VTYn3O2Y4/nsttcp9dAx3NLv1/+AqskMInhM3FFlqHVfkuyD5DhIcdxZxXuOaKGRXsOPkZncnNwa85ojWlmJfI+cqh9w",
+  "W4iNej26iwXnddzmsj0t7NjWrq2cx2eUWO7I+bO5lcYrmEefE6PWkhhmOijniijkoMYO69QWqz/WCfPiTICRGkEVrru+xsiywpgl",
+  "Roczi/mNqSOEcMrnufATNq3VbLlg8IIhJF37MoYThrf7WZKDvvlVHOrlBqgiyA19LPxm9Kiw5cbJgb5OmrEsecVG4WPOq7jjVHFX",
+  "RvE1BA7w/M3P1yPZa/oj5xXCLdftBlOxXBBqKAYMwebADwd5j28d4CSbOzb3bhy7hh46etOLrZCuvJGp/lQjz/mdOyVELbkaO085",
+  "WTTmMEB2TUKLUa/GuvzuC0Px+L3k4FjrMYZm3JCbXxj50OEnYQxWiub5KyDDM/XlS7O3ZKuqjIEzF+aKUfFPcE4i2GcMGMwVMKvl",
+  "rleJERJsoVuCxZG9h4hRH5SiwbEpUBgjR1KEiaTg6XOqokgMZ9EfHK73kPyM+45zgWxIcRgPwcdqWKpGdhs4qK+C5BHe+SsCI3al",
+  "TT8Js1hLWoxj68rQ4OtXoTBCD7PJZN2vADVQ8YoxuXddKKnMwvszyBy5xolopjJJ1NyVWEvGinHsSV0QjDRd1xfHzT7TRFIGbGsc",
+  "SAky7EsDkGMCHVcXo482GTNOwbXITQrFL1bAhpmftbx8X0YuF/G5C+7isV4zGi0yPHwL+/cRogzmcmLIcPiGEyU1oiWSWdzEoXho",
+  "qJp7wealNlyWkw/2amYiWWz/JpcAYw8/y/fr3r5pJf7XLn4yNP7PSBM/uZqkyRq8y9pDaTbIoJbEpX1p8kzVxq3BlI/QqQDm4Bi+",
+  "HVKhRWLlBS0Di4yCUQUZg2/RMrQ8T3vCMAhr970N7NYpF4SBuZmRuuGhtXcJI6FB1fOQLBu+lgw06NhcH6r8vxXAML8E27N8tyAL",
+  "dEaqC7IkWZimxGcodaTd4YryjRAoxBaayWFt5HM3dGtzRn6wlRMuaOHYg3oabTYnc43bjLe7fIBWkZcyb4hp9pmZoR2qDDob668w",
+  "x2MaOA63LxeOZSqYt6T14GRWkgGfXvf75PuZghMfP602In1eKqnup7SBM4EuXaP3jGzqsqtOZtwnhTYmOlc/WxwMeMexAbRvMu5k",
+  "t3miRczwQJlf7kV9KkJYadfWkb/KGmTAsOovhC2h8I77UXCtDarQyxsUfapV6BHIie0yatPaXfrU+81InMqpN4S76bgtBoVPOmFa",
+  "azZHMx3tywjF2peieUppoPJhd+954PdXG4ysXC7SXSdBMMhkozrI3clWd7jgZjemtWcwqZyqmdt159VL7eZ9EDmZQ+fd6PljPY1u",
+  "YBjJTHR3rDCZ7CV2HXa/WA6XCSn3g/Txfrngflpg0Lf1GllN3REk62ncemOxYuzVtNVWZ8GOYyXGhdZlKz/FNJwpSpxx3Df27HSq",
+  "lscFnZawsPasQ4W9P9XbrX3IcPhPB+7n3kabVwT7KUFiITlg7VUzeD19YWBTr29+Ckygj5hB9TPPN8uN1h38/5Atttu3PdwJ+Mi3",
+  "Gf+ccw8qh3UMW+OkRzr4jt1Ixcs96BKQ2VRvsFgGt9Rn85qyQiTEuSeBPxv8yzznXHz0tV0yZF0/B5wABGAkH7bv/vkkklEWfPAP",
+  "UYzyWXYQAY+nDpWyxFKqu/j1+XpheOj2uPUigysJnlBvVjk6qrO19akymUIGqFc44KNLcFVQOHLlia69sURq3m7+Q/bb6j035U/y",
+  "wFAm5L8MfFpp4oS5uqPGCflUcyziXL8jg+Do9IZ/WK9vrH4llqth9uH+NoVupeCouUDzy6QsiyP5gSlbbJ5pGqWnVts0HZAYK+Pb",
+  "Yb0OtfrBwlgaZ8pHBTPVfWpVSQYBzdNxLaU7hptHQ+yfOmz/wmu56md6sqG3dzOektppGOmzjup22nFtijT/rI2vkn6vNhjEga8Z",
+  "6pWxBBTtdJdCHDXTH1KQZf2HHmxOXHD+uwEMnaVLoXO98l/IUP7dGz+Vm30Orz8YJJw2HGa37mFR2vgXQwi0QuwDW8hzxb8uxtrq",
+  "lSbQi746/6+JDukvi8Df8+0U1oSvkiuVZeXJ8pt/uSTW/DAUTHXtG6xNEb/fio3Co7m3akrvOc5zGezBCQOwNgvM8tiX37PbhzUJ",
+  "zsCyWoYeKIkV09+Lsj+HAm03a5hgsN9Bizpyy+tujE6s7f9YAenWikPIccv5rzcQE8bUgr2Z1thfZqulUaqbcRjJruZvD+tENlX7",
+  "2zgJjvuIDQuMxyw/lhuMblPPgvDAMq04e4/zzSuwXWi7GMznOJTFuov+ztxBIsKfF7lHWOpl3p+CdWE5bfzosnkgaVoam9qY9n/u",
+  "xCK4ObvA7AA+UU5DKzbx/oNh/As/vr/MdPNiKDp2cHDWQWg+XizFZLdM7OAQqhindHCzZedsIaMuvjaQq30ZG8q/XBHHTy/WX2U9",
+  "MRgECcPNwFydk6RCPwAgfeL0xRF22SCy6niFzn7wfZv5TwbZAOX4dy90rNdf7qKe97ld1sjU3BbPvYH/LZn53Nu0RHmap9c4D8g3",
+  "Ka+vw3Z/JwtHm7B4mMVUjufeeTT99idICruIe66Gk9A3OL7m0fTL33ixcrOY37WvjvjnB/hXPt61ZJxAFqaE8FL6Dir7Lxz1zz//",
+  "/H/0vCb7728AAA=="
+)
+coast_source_md5 <- "be3001f37196d2894e17aacd13ff2cc2"
+coast_wkt_md5 <- "e344cff4b5a7150b82d5f897809f85ae"
+snapshot_bounds <- c(west = 102, east = 108, south = -9, north = -4)
+if (coast_is_embedded) {
+  if (cfg$west < snapshot_bounds["west"] || cfg$east > snapshot_bounds["east"] ||
+      cfg$south < snapshot_bounds["south"] || cfg$north > snapshot_bounds["north"]) {
+    stop("Domain melampaui snapshot garis pantai. Isi coastline_file dengan poligon daratan yang mencakup domain baru.")
+  }
+  coast_raw <- memDecompress(jsonlite::base64_dec(coast_b64), type = "gzip")
+  coast_wkt <- rawToChar(coast_raw)
+  land_source <- sf::st_sf(geometry = sf::st_as_sfc(coast_wkt, crs = 4326))
+  coast_label <- "Natural Earth Land v5.1.1, skala 1:10.000.000; snapshot 11 September 2026"
+} else {
+  if (!file.exists(cfg$coastline_file)) stop("Berkas coastline_file tidak ditemukan.")
+  land_source <- sf::st_read(cfg$coastline_file, quiet = TRUE)
+  if (is.na(sf::st_crs(land_source))) stop("Berkas daratan harus memiliki CRS yang diketahui.")
+  coast_label <- paste("Poligon daratan pengguna:", basename(cfg$coastline_file))
+}
+```
+
+```{r ocean-mask}
+domain_ll <- sf::st_as_sfc(sf::st_bbox(c(
+  xmin = cfg$west, ymin = cfg$south,
+  xmax = cfg$east, ymax = cfg$north
+), crs = sf::st_crs(4326)))
+domain_area <- sf::st_transform(domain_ll, area_crs)
+
+land_area <- sf::st_make_valid(sf::st_transform(land_source, area_crs))
+land_types <- as.character(sf::st_geometry_type(land_area))
+if (any(land_types == "GEOMETRYCOLLECTION")) {
+  land_area <- suppressWarnings(sf::st_collection_extract(land_area, "POLYGON"))
+}
+if (!all(as.character(sf::st_geometry_type(land_area)) %in% c("POLYGON", "MULTIPOLYGON"))) {
+  stop("coastline_file harus berupa poligon daratan, bukan garis pantai atau titik.")
+}
+
+land_parts <- suppressWarnings(sf::st_cast(sf::st_geometry(land_area), "POLYGON"))
+land_filled <- sf::st_sfc(lapply(land_parts, function(p) {
+  sf::st_polygon(list(p[[1]]))
+}), crs = sf::st_crs(land_area))
+land_filled <- land_filled[lengths(sf::st_intersects(land_filled, domain_area)) > 0]
+if (!length(land_filled)) stop("Tidak ada daratan yang beririsan dengan domain; periksa sumber dan koordinat.")
+land_crop <- suppressWarnings(sf::st_intersection(land_filled, domain_area))
+land_crop <- sf::st_union(sf::st_make_valid(land_crop))
+ocean_area <- sf::st_make_valid(sf::st_difference(domain_area, land_crop))
+if (all(sf::st_is_empty(ocean_area))) stop("Mask laut kosong.")
+
+stopifnot(all(sf::st_is_valid(ocean_area)))
+land_overlap_m2 <- sum(as.numeric(sf::st_area(
+  suppressWarnings(sf::st_intersection(ocean_area, land_crop))
+)))
+if (land_overlap_m2 > area_tol) stop("Mask laut masih bertumpang-tindih dengan daratan.")
+
+land_ll <- sf::st_transform(land_crop, 4326)
+ocean_ll <- sf::st_transform(ocean_area, 4326)
+```
+
+```{r analysis-grid}
+col_first <- as.integer(round((cfg$west + 180) / step_deg))
+col_last <- as.integer(round((cfg$east + 180) / step_deg)) - 1L
+row_first <- as.integer(round((90 - cfg$north) / step_deg))
+row_last <- as.integer(round((90 - cfg$south) / step_deg)) - 1L
+stopifnot(col_first >= 0, col_last < global_nlon,
+          row_first >= 0, row_last < global_nlat)
+
+grid_table <- expand.grid(
+  col_nc0 = seq.int(col_first, col_last),
+  row_nc0 = seq.int(row_first, row_last),
+  KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE
+)
+if (nrow(grid_table) > 100000) stop("Lebih dari 100.000 sel. Perkecil domain untuk percobaan awal.")
+grid_table$cell_no <- seq_len(nrow(grid_table))
+grid_table$grid_id <- sprintf("G025_R%03d_C%04d", grid_table$row_nc0, grid_table$col_nc0)
+grid_table$lon <- -180 + (grid_table$col_nc0 + 0.5) * step_deg
+grid_table$lat <- 90 - (grid_table$row_nc0 + 0.5) * step_deg
+grid_table$row_R1 <- grid_table$row_nc0 + 1L
+grid_table$col_R1 <- grid_table$col_nc0 + 1L
+grid_table$west <- -180 + grid_table$col_nc0 * step_deg
+grid_table$east <- -180 + (grid_table$col_nc0 + 1) * step_deg
+grid_table$south <- 90 - (grid_table$row_nc0 + 1) * step_deg
+grid_table$north <- 90 - grid_table$row_nc0 * step_deg
+grid_table$row_bbox_R1 <- grid_table$row_nc0 - row_first + 1L
+grid_table$col_bbox_R1 <- grid_table$col_nc0 - col_first + 1L
+stopifnot(
+  all(abs(grid_table$lon - (grid_table$west + grid_table$east)/2) < 1e-10),
+  all(abs(grid_table$lat - (grid_table$south + grid_table$north)/2) < 1e-10),
+  all(abs(grid_table$east - grid_table$west - step_deg) < 1e-10),
+  all(abs(grid_table$north - grid_table$south - step_deg) < 1e-10)
+)
+
+if (same_domain) {
+  stopifnot(
+    abs(min(grid_table$lon) - 103.125) < 1e-9,
+    abs(max(grid_table$lon) - 106.875) < 1e-9,
+    abs(max(grid_table$lat) - (-5.125)) < 1e-9,
+    abs(min(grid_table$lat) - (-7.875)) < 1e-9
+  )
+}
+cell_geometry <- sf::st_sfc(lapply(seq_len(nrow(grid_table)), function(k) {
+  x0 <- grid_table$west[k]
+  x1 <- grid_table$east[k]
+  y0 <- grid_table$south[k]
+  y1 <- grid_table$north[k]
+  sf::st_polygon(list(matrix(c(x0,y0, x1,y0, x1,y1, x0,y1, x0,y0), ncol = 2, byrow = TRUE)))
+}), crs = 4326)
+grid_analysis <- sf::st_sf(grid_table, geometry = cell_geometry)
+grid_area <- sf::st_transform(grid_analysis, area_crs)
+grid_area$cell_area_km2 <- as.numeric(sf::st_area(grid_area)) / 1e6
+```
+
+```{r grid-ocean-intersection}
+grid_water_all <- suppressWarnings(sf::st_intersection(grid_area, ocean_area))
+water_m2 <- as.numeric(sf::st_area(grid_water_all))
+grid_water_all <- grid_water_all[is.finite(water_m2) & water_m2 > area_tol, ]
+if (!nrow(grid_water_all)) stop("Tidak ada grid laut yang lolos toleransi geometri.")
+if (anyDuplicated(grid_water_all$grid_id)) {
+  stop("ID terduplikasi setelah overlay. Gabungkan fragmen per grid_id sebelum menghitung sel.")
+}
+
+grid_area$sea_area_km2 <- 0
+water_index <- match(grid_water_all$grid_id, grid_area$grid_id)
+grid_area$sea_area_km2[water_index] <- as.numeric(sf::st_area(grid_water_all)) / 1e6
+grid_area$sea_fraction <- pmin(1, pmax(0, grid_area$sea_area_km2 / grid_area$cell_area_km2))
+grid_area$status <- ifelse(grid_area$sea_area_km2 * 1e6 <= area_tol, "Daratan",
+                          ifelse(grid_area$sea_fraction >= 1 - ratio_tol,
+                                 "Laut penuh", "Pesisir campuran"))
+
+analysis_centers <- sf::st_as_sf(grid_table, coords = c("lon", "lat"),
+                             crs = 4326, remove = FALSE)
+center_area <- sf::st_transform(analysis_centers, area_crs)
+grid_area$center_at_sea <- lengths(sf::st_intersects(center_area, ocean_area)) > 0
+
+grid_area$selected <- switch(
+  cfg$selection_rule,
+  center = grid_area$center_at_sea,
+  majority = grid_area$sea_fraction >= 0.5,
+  any = grid_area$sea_area_km2 * 1e6 > area_tol
+)
+grid_area$selection_rule <- cfg$selection_rule
+
+grid_water_all$cell_area_km2 <- grid_area$cell_area_km2[water_index]
+grid_water_all$sea_area_km2 <- grid_area$sea_area_km2[water_index]
+grid_water_all$sea_fraction <- grid_area$sea_fraction[water_index]
+grid_water_all$status <- grid_area$status[water_index]
+grid_water_all$center_at_sea <- grid_area$center_at_sea[water_index]
+grid_water_all$selected <- grid_area$selected[water_index]
+grid_water_all$selection_rule <- cfg$selection_rule
+
+selected_ids <- grid_area$grid_id[grid_area$selected]
+grid_water <- grid_water_all[grid_water_all$grid_id %in% selected_ids, ]
+if (!nrow(grid_water)) stop("Tidak ada grid model yang lolos aturan pemilihan.")
+grid_water_ll <- sf::st_transform(grid_water, 4326)
+grid_metadata <- sf::st_drop_geometry(grid_area)
+marine_metadata <- grid_metadata[grid_metadata$selected, ]
+
+ocean_km2 <- sum(as.numeric(sf::st_area(ocean_area))) / 1e6
+reconstructed_km2 <- sum(grid_water_all$sea_area_km2)
+area_difference_m2 <- abs(ocean_km2 - reconstructed_km2) * 1e6
+if (area_difference_m2 > max(1, nrow(grid_area) * area_tol)) {
+  stop("Jumlah luas irisan sel tidak cocok dengan luas mask laut. Periksa geometri.")
+}
+stopifnot(!anyDuplicated(marine_metadata$grid_id),
+          all(marine_metadata$selected),
+          all(marine_metadata$sea_fraction > 0),
+          all(marine_metadata$sea_fraction <= 1))
+```
+
+# Ringkasan
+
+```{r grid-counts}
+n_bbox <- nrow(grid_area)
+n_intersect <- sum(grid_metadata$status != "Daratan")
+n_marine <- nrow(marine_metadata)
+n_full <- sum(marine_metadata$status == "Laut penuh")
+n_coastal <- sum(marine_metadata$status == "Pesisir campuran")
+n_land <- sum(grid_metadata$status == "Daratan")
+n_not_selected <- n_bbox - n_marine
+stopifnot(n_bbox == n_marine + n_not_selected,
+          n_marine == n_full + n_coastal,
+          n_intersect >= n_marine)
+
+summary_grid <- data.frame(
+  Kelompok = c("Seluruh grid 0,25°", "Grid terpilih", "Laut penuh",
+               "Pesisir", "Dikeluarkan"),
+  Jumlah = c(n_bbox, n_marine, n_full, n_coastal, n_not_selected)
+)
+knitr::kable(summary_grid, format.args = list(big.mark = "."), align = c("l", "r"))
+
+```
+
+```{r independent-check, results='hide'}
+check_note <- "Pembanding dilewati karena domain, garis pantai, atau toleransi diubah."
+if (default_check) {
+  expected <- c(n_bbox=192L, n_intersect=172L, n_marine=148L,
+                n_full=121L, n_coastal=27L, n_land=20L)
+  observed <- c(n_bbox=n_bbox, n_intersect=n_intersect, n_marine=n_marine,
+                n_full=n_full, n_coastal=n_coastal, n_land=n_land)
+  check_table <- data.frame(
+    Ukuran = names(expected),
+    Pembanding_independen = unname(expected),
+    Hasil_R = unname(observed),
+    Cocok = unname(expected == observed)
+  )
+  print(knitr::kable(check_table))
+  check_note <- if (all(check_table$Cocok)) {
+    "Dimensi dan pemilihan grid 0,25 derajat cocok dengan pemeriksaan geometris."
+  } else {
+    "Hasil R berbeda dari pembanding. Jangan gunakan angka final sebelum memeriksa sumber, versi paket, dan overlay."
+  }
+  if (!all(check_table$Cocok)) warning(check_note, call. = FALSE)
+}
+cat("\n\n", check_note, "\n\n", sep="")
+```
+
+# Peta grid
+
+```{r map-functions}
+map_view <- function(xlim = c(cfg$west, cfg$east),
+                     ylim = c(cfg$south, cfg$north)) {
+  ggplot2::coord_sf(crs=sf::st_crs(4326), default_crs=sf::st_crs(4326),
+                    xlim=xlim, ylim=ylim, expand=FALSE, default=FALSE)
+}
+base_map <- function() {
+  ggplot2::ggplot() +
+    ggplot2::geom_sf(data = sf::st_sf(geometry=domain_ll), fill="white", color=NA) +
+    ggplot2::theme_minimal(base_size=11) +
+    ggplot2::theme(legend.position="bottom") +
+    ggplot2::labs(x="Bujur", y="Lintang")
+}
+map_mask <- base_map() +
+  ggplot2::geom_sf(data=sf::st_sf(geometry=ocean_ll), fill="lightblue", color=NA) +
+  ggplot2::geom_sf(data=sf::st_sf(geometry=land_ll), fill="grey80", color="grey50", linewidth=0.25) +
+  ggplot2::labs(title="Mask laut") +
+  map_view()
+map_grid <- base_map() +
+  ggplot2::geom_sf(data=grid_water_ll, ggplot2::aes(fill=status), color="grey30", linewidth=0.2) +
+  ggplot2::geom_sf(data=sf::st_sf(geometry=land_ll), fill="grey80", color="grey50", linewidth=0.25) +
+  ggplot2::scale_fill_manual(values=c("Laut penuh"="skyblue", "Pesisir campuran"="khaki"), name=NULL) +
+  ggplot2::labs(title="Grid laut terpilih") +
+  map_view()
+```
+
+```{r map-mask, results='hide', fig.show='hide'}
+print(map_mask)
+```
+
+```{r map-grid}
+print(map_grid)
+```
+
+# Koordinat
+
+```{r coordinate-tables}
+coordinate_columns <- c("grid_id", "cell_no", "lon", "lat",
+                        "west", "east", "south", "north",
+                        "row_nc0", "col_nc0", "row_R1", "col_R1",
+                        "row_bbox_R1", "col_bbox_R1",
+                        "status", "sea_fraction", "center_at_sea",
+                        "selected", "selection_rule")
+marine_coordinates <- marine_metadata[, coordinate_columns]
+marine_coordinates$crs_epsg <- 4326L
+
+marine_centers <- sf::st_as_sf(marine_coordinates, coords=c("lon","lat"),
+                              crs=4326, remove=FALSE)
+stopifnot(nrow(marine_coordinates) == n_marine,
+          !anyNA(marine_coordinates[, c("lon","lat","west","east","south","north")]),
+          !anyDuplicated(marine_coordinates$grid_id))
+```
+
+```{r metadata-example}
+knitr::kable(utils::head(marine_coordinates[, c("grid_id", "lon", "lat")], 10), digits=6)
+```
+
+```{r export-results, results='hide'}
+if (isTRUE(cfg$write_outputs)) {
+  output_csv <- file.path(project_dir, "output_grid_target.csv")
+  utils::write.csv(marine_coordinates, output_csv,
+                   row.names=FALSE, fileEncoding="UTF-8")
+  csv_check <- utils::read.csv(output_csv,
+                               stringsAsFactors=FALSE)
+  stopifnot(identical(csv_check$grid_id, marine_coordinates$grid_id),
+            nrow(csv_check) == n_marine,
+            max(abs(csv_check$lon - marine_coordinates$lon)) < 1e-10,
+            max(abs(csv_check$lat - marine_coordinates$lat)) < 1e-10)
+}
+```
