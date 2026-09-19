@@ -1,0 +1,977 @@
+---
+title: "EDA Kelayakan GSTARX Klorofil-a Selat Sunda"
+author: "Rafi Adabhi Sunarya"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    lightbox: true
+    gallery: false
+    highlight: kate
+    toc_depth: 3
+    code_folding: show
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  out.width = "100%"
+)
+
+options(scipen = 999, dplyr.summarise.inform = FALSE)
+
+required_packages <- c(
+  "tidyverse", "lubridate", "patchwork", "spdep", "igraph",
+  "broom", "tseries", "zoo", "knitr", "scales"
+)
+
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Instal paket berikut terlebih dahulu: ",
+    paste(missing_packages, collapse = ", ")
+  )
+}
+
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+library(spdep)
+library(igraph)
+library(broom)
+library(tseries)
+library(zoo)
+library(knitr)
+library(scales)
+
+theme_set(theme_minimal(base_size = 11))
+
+ROOT <- "D:/thesis"
+PANEL_PATH <- file.path(
+  ROOT, "data", "processed", "model_dataset",
+  "selat_sunda_monthly_panel_200301_202512_v1.csv"
+)
+TABLE_DIR <- file.path(ROOT, "output", "tables", "eda_gstarx")
+dir.create(TABLE_DIR, recursive = TRUE, showWarnings = FALSE)
+
+TRAIN_END <- as.Date("2020-12-01")
+VALIDATION_START <- as.Date("2021-01-01")
+VALIDATION_END <- as.Date("2022-12-01")
+GRID_STEP <- 0.25
+NSIM_MORAN <- 999
+```
+
+# Data
+
+```{r read-data}
+required_columns <- c(
+  "month", "grid_id", "lon", "lat", "chla_mg_m3", "sst_c",
+  "sst_anomaly_c", "u10_m_s", "v10_m_s", "wind_speed_m_s"
+)
+
+panel <- readr::read_csv(
+  PANEL_PATH,
+  show_col_types = FALSE,
+  progress = FALSE
+)
+
+missing_columns <- setdiff(required_columns, names(panel))
+if (length(missing_columns) > 0) {
+  stop("Kolom tidak ditemukan: ", paste(missing_columns, collapse = ", "))
+}
+
+panel <- panel %>%
+  transmute(
+    month = as.Date(month),
+    grid_id = as.character(grid_id),
+    lon = as.numeric(lon),
+    lat = as.numeric(lat),
+    chla_mg_m3 = as.numeric(chla_mg_m3),
+    sst_c = as.numeric(sst_c),
+    sst_anomaly_c = as.numeric(sst_anomaly_c),
+    u10_m_s = as.numeric(u10_m_s),
+    v10_m_s = as.numeric(v10_m_s),
+    wind_speed_m_s = as.numeric(wind_speed_m_s)
+  ) %>%
+  arrange(month, grid_id) %>%
+  mutate(
+    chla_observed = is.finite(chla_mg_m3),
+    log_chla = if_else(chla_mg_m3 > 0, log(chla_mg_m3), NA_real_),
+    calendar_month = month(month),
+    year = year(month)
+  )
+
+if (anyNA(panel$month)) stop("Kolom month tidak berhasil dibaca sebagai tanggal.")
+if (anyDuplicated(panel[c("month", "grid_id")])) {
+  stop("Ada kombinasi month dan grid_id yang duplikat.")
+}
+
+n_grid <- n_distinct(panel$grid_id)
+n_month <- n_distinct(panel$month)
+
+if (nrow(panel) != n_grid * n_month) {
+  stop("Panel belum memiliki seluruh kombinasi grid dan bulan.")
+}
+
+data_overview <- tibble(
+  ukuran_panel = nrow(panel),
+  jumlah_grid = n_grid,
+  jumlah_bulan = n_month,
+  periode_awal = min(panel$month),
+  periode_akhir = max(panel$month),
+  chla_tersedia = mean(panel$chla_observed),
+  sst_tersedia = mean(is.finite(panel$sst_c)),
+  angin_tersedia = mean(is.finite(panel$u10_m_s) & is.finite(panel$v10_m_s))
+)
+
+knitr::kable(data_overview, digits = 3)
+```
+
+# Kelengkapan Data
+
+```{r availability-summary}
+monthly_summary <- panel %>%
+  group_by(month) %>%
+  summarise(
+    n_grid = n(),
+    n_chla = sum(chla_observed),
+    availability = mean(chla_observed),
+    chla_mean = mean(chla_mg_m3, na.rm = TRUE),
+    chla_median = median(chla_mg_m3, na.rm = TRUE),
+    sst_mean = mean(sst_c, na.rm = TRUE),
+    wind_speed_mean = mean(wind_speed_m_s, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+grid_summary <- panel %>%
+  group_by(grid_id) %>%
+  summarise(
+    lon = first(lon),
+    lat = first(lat),
+    n_month = n(),
+    n_chla = sum(chla_observed),
+    availability = mean(chla_observed),
+    chla_mean = mean(chla_mg_m3, na.rm = TRUE),
+    chla_median = median(chla_mg_m3, na.rm = TRUE),
+    chla_sd = sd(chla_mg_m3, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(monthly_summary, file.path(TABLE_DIR, "monthly_summary_v1.csv"))
+write_csv(grid_summary, file.path(TABLE_DIR, "grid_summary_v1.csv"))
+
+p_availability_time <- ggplot(monthly_summary, aes(month, availability)) +
+  geom_line(linewidth = 0.45, colour = "#2C3E50") +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  labs(x = NULL, y = "Chl-a tersedia")
+
+p_availability_map <- ggplot(grid_summary, aes(lon, lat, fill = availability)) +
+  geom_tile(width = GRID_STEP * 0.94, height = GRID_STEP * 0.94) +
+  coord_equal() +
+  scale_fill_viridis_c(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  labs(x = "Bujur", y = "Lintang", fill = "Tersedia")
+
+p_availability_time / p_availability_map
+```
+
+```{r missingness-heatmap, fig.height=7}
+grid_order <- grid_summary %>%
+  arrange(lat, lon) %>%
+  pull(grid_id)
+
+panel %>%
+  mutate(grid_plot = factor(grid_id, levels = grid_order)) %>%
+  ggplot(aes(month, grid_plot, fill = chla_observed)) +
+  geom_tile() +
+  scale_fill_manual(values = c(`TRUE` = "#253494", `FALSE` = "#D7301F")) +
+  labs(x = NULL, y = "Grid", fill = "Teramati") +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+```
+
+# Distribusi Klorofil-a
+
+```{r target-distribution}
+p_raw <- panel %>%
+  filter(chla_mg_m3 > 0) %>%
+  ggplot(aes(chla_mg_m3)) +
+  geom_histogram(bins = 60, fill = "#3182BD", colour = "white") +
+  labs(x = expression("Chl-a (mg "~m^{-3}*")"), y = "Frekuensi")
+
+p_log <- panel %>%
+  filter(is.finite(log_chla)) %>%
+  ggplot(aes(log_chla)) +
+  geom_histogram(bins = 60, fill = "#31A354", colour = "white") +
+  labs(x = "log(Chl-a)", y = "Frekuensi")
+
+p_raw + p_log
+```
+
+```{r target-outliers}
+sample_skewness <- function(x) {
+  x <- x[is.finite(x)]
+  mean((x - mean(x))^3) / sd(x)^3
+}
+
+target_quantiles <- panel %>%
+  summarise(
+    minimum = min(chla_mg_m3, na.rm = TRUE),
+    q01 = quantile(chla_mg_m3, 0.01, na.rm = TRUE),
+    median = median(chla_mg_m3, na.rm = TRUE),
+    q99 = quantile(chla_mg_m3, 0.99, na.rm = TRUE),
+    maximum = max(chla_mg_m3, na.rm = TRUE),
+    skew_raw = sample_skewness(chla_mg_m3),
+    skew_log = sample_skewness(log_chla)
+  )
+
+knitr::kable(target_quantiles, digits = 4)
+```
+
+# Pola Temporal dan Musiman
+
+```{r temporal-overview, fig.height=8}
+p_chla_time <- ggplot(monthly_summary, aes(month, chla_median)) +
+  geom_line(linewidth = 0.45, colour = "black") +
+  labs(x = NULL, y = expression("Median Chl-a (mg "~m^{-3}*")"))
+
+p_sst_time <- ggplot(monthly_summary, aes(month, sst_mean)) +
+  geom_line(linewidth = 0.45, colour = "#D7301F") +
+  labs(x = NULL, y = "Rata-rata SST (°C)")
+
+p_wind_time <- ggplot(monthly_summary, aes(month, wind_speed_mean)) +
+  geom_line(linewidth = 0.45, colour = "#2171B5") +
+  labs(x = NULL, y = expression("Kecepatan angin (m "~s^{-1}*")"))
+
+p_chla_time / p_sst_time / p_wind_time
+```
+
+```{r seasonal-cycle, fig.height=8}
+seasonal_summary <- panel %>%
+  group_by(calendar_month) %>%
+  summarise(
+    chla_median = median(chla_mg_m3, na.rm = TRUE),
+    sst_mean = mean(sst_c, na.rm = TRUE),
+    wind_speed_mean = mean(wind_speed_m_s, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+month_labels <- month.abb
+
+p_chla_season <- ggplot(seasonal_summary, aes(calendar_month, chla_median)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = 1:12, labels = month_labels) +
+  labs(x = NULL, y = expression("Median Chl-a (mg "~m^{-3}*")"))
+
+p_sst_season <- ggplot(seasonal_summary, aes(calendar_month, sst_mean)) +
+  geom_line(linewidth = 0.6, colour = "#D7301F") +
+  geom_point(size = 2, colour = "#D7301F") +
+  scale_x_continuous(breaks = 1:12, labels = month_labels) +
+  labs(x = NULL, y = "Rata-rata SST (°C)")
+
+p_wind_season <- ggplot(seasonal_summary, aes(calendar_month, wind_speed_mean)) +
+  geom_line(linewidth = 0.6, colour = "#2171B5") +
+  geom_point(size = 2, colour = "#2171B5") +
+  scale_x_continuous(breaks = 1:12, labels = month_labels) +
+  labs(x = "Bulan", y = expression("Kecepatan angin (m "~s^{-1}*")"))
+
+p_chla_season / p_sst_season / p_wind_season
+```
+
+# Pola Spasial
+
+```{r spatial-summary, fig.height=9}
+grid_month_summary <- panel %>%
+  group_by(grid_id, lon, lat, calendar_month) %>%
+  summarise(chla_median = median(chla_mg_m3, na.rm = TRUE), .groups = "drop")
+
+peak_month <- grid_month_summary %>%
+  group_by(grid_id) %>%
+  slice_max(chla_median, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(grid_id, peak_month = calendar_month)
+
+grid_summary <- grid_summary %>%
+  left_join(peak_month, by = "grid_id")
+
+write_csv(grid_summary, file.path(TABLE_DIR, "grid_spatial_summary_v1.csv"))
+
+p_spatial_mean <- ggplot(grid_summary, aes(lon, lat, fill = chla_mean)) +
+  geom_tile(width = GRID_STEP * 0.94, height = GRID_STEP * 0.94) +
+  coord_equal() +
+  scale_fill_viridis_c(trans = "log10") +
+  labs(x = "Bujur", y = "Lintang", fill = "Rata-rata\nChl-a")
+
+p_spatial_sd <- ggplot(grid_summary, aes(lon, lat, fill = chla_sd)) +
+  geom_tile(width = GRID_STEP * 0.94, height = GRID_STEP * 0.94) +
+  coord_equal() +
+  scale_fill_viridis_c(trans = "log10") +
+  labs(x = "Bujur", y = "Lintang", fill = "SD Chl-a")
+
+p_peak_month <- ggplot(grid_summary, aes(lon, lat, fill = peak_month)) +
+  geom_tile(width = GRID_STEP * 0.94, height = GRID_STEP * 0.94) +
+  coord_equal() +
+  scale_fill_viridis_c(breaks = 1:12, labels = month_labels) +
+  labs(x = "Bujur", y = "Lintang", fill = "Bulan puncak")
+
+p_spatial_mean / p_spatial_sd / p_peak_month
+```
+
+# Seasonal Adjustment
+
+```{r seasonal-adjustment}
+climatology <- panel %>%
+  filter(month <= TRAIN_END) %>%
+  group_by(grid_id, calendar_month) %>%
+  summarise(
+    climatology_log_chla = mean(log_chla, na.rm = TRUE),
+    climatology_u10 = mean(u10_m_s, na.rm = TRUE),
+    climatology_v10 = mean(v10_m_s, na.rm = TRUE),
+    climatology_wind_speed = mean(wind_speed_m_s, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    across(
+      starts_with("climatology_"),
+      ~ if_else(is.nan(.x), NA_real_, .x)
+    )
+  )
+
+panel <- panel %>%
+  left_join(climatology, by = c("grid_id", "calendar_month")) %>%
+  mutate(
+    log_chla_anom = log_chla - climatology_log_chla,
+    u10_anom = u10_m_s - climatology_u10,
+    v10_anom = v10_m_s - climatology_v10,
+    wind_speed_anom = wind_speed_m_s - climatology_wind_speed
+  )
+
+regional_anomaly <- panel %>%
+  group_by(month) %>%
+  summarise(
+    median_log_chla_anom = median(log_chla_anom, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(regional_anomaly, aes(month, median_log_chla_anom)) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_line(linewidth = 0.45, colour = "#54278F") +
+  labs(x = NULL, y = "Median anomali log Chl-a")
+```
+
+# Stasioneritas
+
+```{r stationarity-tests}
+fill_for_test <- function(x) {
+  x <- zoo::na.approx(x, na.rm = FALSE, maxgap = 6)
+  x <- zoo::na.locf(x, na.rm = FALSE)
+  x <- zoo::na.locf(x, na.rm = FALSE, fromLast = TRUE)
+  if (anyNA(x)) x[is.na(x)] <- median(x, na.rm = TRUE)
+  x
+}
+
+stationarity <- panel %>%
+  arrange(grid_id, month) %>%
+  group_by(grid_id) %>%
+  group_modify(~ {
+    x <- fill_for_test(.x$log_chla_anom)
+    adf_p <- tryCatch(
+      suppressWarnings(tseries::adf.test(x)$p.value),
+      error = function(e) NA_real_
+    )
+    kpss_p <- tryCatch(
+      suppressWarnings(tseries::kpss.test(x, null = "Level")$p.value),
+      error = function(e) NA_real_
+    )
+    tibble(adf_p = adf_p, kpss_p = kpss_p)
+  }) %>%
+  ungroup()
+
+stationarity_summary <- stationarity %>%
+  summarise(
+    grid_adf_menolak_unit_root = mean(adf_p < 0.05, na.rm = TRUE),
+    grid_kpss_tidak_menolak_stasioner = mean(kpss_p >= 0.05, na.rm = TRUE)
+  )
+
+write_csv(stationarity, file.path(TABLE_DIR, "stationarity_by_grid_v1.csv"))
+knitr::kable(stationarity_summary, digits = 3)
+```
+
+# Matriks Bobot Spasial
+
+```{r spatial-weights}
+coordinates <- panel %>%
+  distinct(grid_id, lon, lat) %>%
+  arrange(grid_id)
+
+dx <- abs(outer(coordinates$lon, coordinates$lon, "-"))
+dy <- abs(outer(coordinates$lat, coordinates$lat, "-"))
+tolerance <- 1e-8
+
+adjacency <- (
+  (abs(dx - GRID_STEP) < tolerance & dy < tolerance) |
+    (abs(dy - GRID_STEP) < tolerance & dx < tolerance)
+) * 1
+
+diag(adjacency) <- 0
+rownames(adjacency) <- coordinates$grid_id
+colnames(adjacency) <- coordinates$grid_id
+
+neighbor_count <- rowSums(adjacency)
+W <- adjacency
+has_neighbor <- neighbor_count > 0
+W[has_neighbor, ] <- W[has_neighbor, , drop = FALSE] / neighbor_count[has_neighbor]
+
+grid_graph <- igraph::graph_from_adjacency_matrix(
+  adjacency,
+  mode = "undirected",
+  diag = FALSE
+)
+graph_components <- igraph::components(grid_graph)
+
+weight_summary <- tibble(
+  jumlah_grid = nrow(coordinates),
+  jumlah_hubungan = sum(adjacency) / 2,
+  minimum_tetangga = min(neighbor_count),
+  median_tetangga = median(neighbor_count),
+  maksimum_tetangga = max(neighbor_count),
+  grid_tanpa_tetangga = sum(neighbor_count == 0),
+  komponen_terpisah = graph_components$no
+)
+
+weight_table <- as.data.frame(W) %>%
+  tibble::rownames_to_column("grid_id")
+
+write_csv(weight_table, file.path(TABLE_DIR, "spatial_weight_rook_v1.csv"))
+knitr::kable(weight_summary)
+```
+
+```{r spatial-network, fig.height=7}
+edge_index <- which(upper.tri(adjacency) & adjacency == 1, arr.ind = TRUE)
+
+edge_data <- tibble(
+  lon = coordinates$lon[edge_index[, 1]],
+  lat = coordinates$lat[edge_index[, 1]],
+  lon_end = coordinates$lon[edge_index[, 2]],
+  lat_end = coordinates$lat[edge_index[, 2]]
+)
+
+coordinate_plot <- coordinates %>%
+  mutate(
+    neighbor_count = neighbor_count,
+    component = factor(graph_components$membership)
+  )
+
+ggplot() +
+  geom_segment(
+    data = edge_data,
+    aes(lon, lat, xend = lon_end, yend = lat_end),
+    linewidth = 0.25,
+    colour = "grey65"
+  ) +
+  geom_point(
+    data = coordinate_plot,
+    aes(lon, lat, colour = component, size = neighbor_count)
+  ) +
+  coord_equal() +
+  labs(x = "Bujur", y = "Lintang", colour = "Komponen", size = "Tetangga")
+```
+
+# Spatial Lag
+
+```{r spatial-lag}
+wide_anomaly <- panel %>%
+  select(month, grid_id, log_chla_anom) %>%
+  pivot_wider(names_from = grid_id, values_from = log_chla_anom) %>%
+  arrange(month)
+
+anomaly_matrix <- wide_anomaly %>%
+  select(all_of(coordinates$grid_id)) %>%
+  as.matrix()
+
+observed_matrix <- is.finite(anomaly_matrix) * 1
+anomaly_zero <- anomaly_matrix
+anomaly_zero[!is.finite(anomaly_zero)] <- 0
+
+spatial_numerator <- anomaly_zero %*% t(W)
+spatial_denominator <- observed_matrix %*% t(W)
+spatial_lag_matrix <- spatial_numerator / spatial_denominator
+spatial_lag_matrix[spatial_denominator == 0] <- NA_real_
+
+spatial_lag_long <- as_tibble(spatial_lag_matrix) %>%
+  mutate(month = wide_anomaly$month, .before = 1) %>%
+  pivot_longer(
+    -month,
+    names_to = "grid_id",
+    values_to = "w_log_chla_anom"
+  )
+
+panel <- panel %>%
+  left_join(spatial_lag_long, by = c("month", "grid_id")) %>%
+  arrange(grid_id, month) %>%
+  group_by(grid_id) %>%
+  mutate(
+    own_lag1 = lag(log_chla_anom, 1),
+    own_lag2 = lag(log_chla_anom, 2),
+    own_lag12 = lag(log_chla_anom, 12),
+    spatial_lag1 = lag(w_log_chla_anom, 1)
+  ) %>%
+  ungroup()
+```
+
+# Moran's I Bulanan
+
+```{r moran-functions}
+moran_one <- function(data, value, nsim = NSIM_MORAN) {
+  x <- data[[value]][match(coordinates$grid_id, data$grid_id)]
+  keep <- is.finite(x)
+  adjacency_sub <- adjacency[keep, keep, drop = FALSE]
+
+  if (sum(keep) < 10 || sum(adjacency_sub) == 0) {
+    return(tibble(moran_i = NA_real_, p_value = NA_real_, n = sum(keep)))
+  }
+
+  listw_sub <- spdep::mat2listw(
+    adjacency_sub,
+    row.names = coordinates$grid_id[keep],
+    style = "W",
+    zero.policy = TRUE
+  )
+
+  test <- spdep::moran.mc(
+    x[keep],
+    listw = listw_sub,
+    nsim = nsim,
+    zero.policy = TRUE,
+    alternative = "greater"
+  )
+
+  tibble(
+    moran_i = unname(test$statistic),
+    p_value = test$p.value,
+    n = sum(keep)
+  )
+}
+```
+
+```{r monthly-moran, fig.height=7}
+set.seed(20260918)
+
+moran_raw <- panel %>%
+  group_by(month) %>%
+  group_modify(~ moran_one(.x, "log_chla")) %>%
+  ungroup() %>%
+  mutate(series = "Log Chl-a")
+
+moran_anomaly <- panel %>%
+  group_by(month) %>%
+  group_modify(~ moran_one(.x, "log_chla_anom")) %>%
+  ungroup() %>%
+  mutate(series = "Anomali log Chl-a")
+
+moran_monthly <- bind_rows(moran_raw, moran_anomaly)
+
+moran_summary <- moran_monthly %>%
+  group_by(series) %>%
+  summarise(
+    median_moran_i = median(moran_i, na.rm = TRUE),
+    q25 = quantile(moran_i, 0.25, na.rm = TRUE),
+    q75 = quantile(moran_i, 0.75, na.rm = TRUE),
+    proporsi_positif = mean(moran_i > 0, na.rm = TRUE),
+    proporsi_positif_signifikan = mean(moran_i > 0 & p_value < 0.05, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(moran_monthly, file.path(TABLE_DIR, "monthly_moran_v1.csv"))
+write_csv(moran_summary, file.path(TABLE_DIR, "moran_summary_v1.csv"))
+
+ggplot(moran_monthly, aes(month, moran_i, colour = series)) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_line(linewidth = 0.45) +
+  facet_wrap(~ series, ncol = 1, scales = "free_y") +
+  labs(x = NULL, y = "Moran's I", colour = NULL) +
+  theme(legend.position = "none")
+```
+
+```{r moran-summary-table}
+knitr::kable(moran_summary, digits = 3)
+```
+
+# Korelasi Antargrid
+
+```{r pairwise-spatial-correlation, fig.height=7}
+correlation_matrix <- cor(anomaly_matrix, use = "pairwise.complete.obs")
+distance_matrix <- sqrt(dx^2 + dy^2)
+pair_index <- which(upper.tri(correlation_matrix), arr.ind = TRUE)
+
+pairwise_correlation <- tibble(
+  grid_1 = coordinates$grid_id[pair_index[, 1]],
+  grid_2 = coordinates$grid_id[pair_index[, 2]],
+  distance_degree = distance_matrix[pair_index],
+  neighbor = adjacency[pair_index] == 1,
+  correlation = correlation_matrix[pair_index]
+) %>%
+  filter(is.finite(correlation)) %>%
+  mutate(
+    distance_group = cut(
+      distance_degree,
+      breaks = c(0, 0.26, 0.51, 0.76, 1.01, 1.51, Inf),
+      include.lowest = TRUE
+    )
+  )
+
+write_csv(
+  pairwise_correlation,
+  file.path(TABLE_DIR, "pairwise_grid_correlation_v1.csv")
+)
+
+p_neighbor_correlation <- ggplot(
+  pairwise_correlation,
+  aes(factor(neighbor, labels = c("Bukan tetangga", "Tetangga")), correlation)
+) +
+  geom_boxplot(outlier.alpha = 0.15) +
+  labs(x = NULL, y = "Korelasi anomali log Chl-a")
+
+p_distance_correlation <- ggplot(
+  pairwise_correlation,
+  aes(distance_group, correlation)
+) +
+  geom_boxplot(outlier.alpha = 0.1) +
+  labs(x = "Jarak antarpusat grid (derajat)", y = "Korelasi anomali log Chl-a") +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+p_neighbor_correlation / p_distance_correlation
+```
+
+# Autokorelasi Temporal
+
+```{r temporal-acf, fig.height=6}
+temporal_acf <- panel %>%
+  arrange(grid_id, month) %>%
+  group_by(grid_id) %>%
+  group_modify(~ {
+    x <- .x$log_chla_anom
+    tibble(
+      lag = 1:24,
+      acf = map_dbl(
+        1:24,
+        ~ cor(x, dplyr::lag(x, .x), use = "pairwise.complete.obs")
+      )
+    )
+  }) %>%
+  ungroup()
+
+acf_summary <- temporal_acf %>%
+  group_by(lag) %>%
+  summarise(
+    median_acf = median(acf, na.rm = TRUE),
+    q25 = quantile(acf, 0.25, na.rm = TRUE),
+    q75 = quantile(acf, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(acf_summary, file.path(TABLE_DIR, "temporal_acf_summary_v1.csv"))
+
+ggplot(acf_summary, aes(lag, median_acf)) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_ribbon(aes(ymin = q25, ymax = q75), fill = "#9ECAE1", alpha = 0.6) +
+  geom_line(colour = "#08519C", linewidth = 0.7) +
+  geom_point(colour = "#08519C", size = 1.4) +
+  scale_x_continuous(breaks = seq(1, 24, 2)) +
+  labs(x = "Lag bulan", y = "ACF median antargrid")
+```
+
+```{r temporal-vs-spatial-lag, fig.height=6}
+lag_correlation_grid <- panel %>%
+  group_by(grid_id) %>%
+  summarise(
+    lon = first(lon),
+    lat = first(lat),
+    own_lag1_correlation = cor(
+      log_chla_anom,
+      own_lag1,
+      use = "pairwise.complete.obs"
+    ),
+    spatial_lag1_correlation = cor(
+      log_chla_anom,
+      spatial_lag1,
+      use = "pairwise.complete.obs"
+    ),
+    .groups = "drop"
+  )
+
+write_csv(
+  lag_correlation_grid,
+  file.path(TABLE_DIR, "lag_correlation_by_grid_v1.csv")
+)
+
+p_own_lag <- ggplot(
+  lag_correlation_grid,
+  aes(lon, lat, fill = own_lag1_correlation)
+) +
+  geom_tile(width = GRID_STEP * 0.94, height = GRID_STEP * 0.94) +
+  coord_equal() +
+  scale_fill_gradient2(limits = c(-1, 1), low = "#B2182B", mid = "white", high = "#2166AC") +
+  labs(x = "Bujur", y = "Lintang", fill = "Korelasi", title = "Lag temporal")
+
+p_spatial_lag <- ggplot(
+  lag_correlation_grid,
+  aes(lon, lat, fill = spatial_lag1_correlation)
+) +
+  geom_tile(width = GRID_STEP * 0.94, height = GRID_STEP * 0.94) +
+  coord_equal() +
+  scale_fill_gradient2(limits = c(-1, 1), low = "#B2182B", mid = "white", high = "#2166AC") +
+  labs(x = "Bujur", y = "Lintang", fill = "Korelasi", title = "Lag spasial")
+
+p_own_lag + p_spatial_lag
+```
+
+# Hubungan Prediktor dengan Target Masa Depan
+
+```{r exogenous-lag-correlation}
+predictor_names <- c("sst_anomaly_c", "u10_anom", "v10_anom")
+
+future_correlation <- map_dfr(1:3, function(h) {
+  horizon_data <- panel %>%
+    arrange(grid_id, month) %>%
+    group_by(grid_id) %>%
+    mutate(target = lead(log_chla_anom, h)) %>%
+    ungroup()
+
+  map_dfr(predictor_names, function(predictor) {
+    horizon_data %>%
+      group_by(grid_id) %>%
+      summarise(
+        correlation = cor(
+          target,
+          .data[[predictor]],
+          use = "pairwise.complete.obs"
+        ),
+        .groups = "drop"
+      ) %>%
+      summarise(
+        median_correlation = median(correlation, na.rm = TRUE),
+        q25 = quantile(correlation, 0.25, na.rm = TRUE),
+        q75 = quantile(correlation, 0.75, na.rm = TRUE)
+      ) %>%
+      mutate(horizon = h, predictor = predictor, .before = 1)
+  })
+})
+
+write_csv(
+  future_correlation,
+  file.path(TABLE_DIR, "future_predictor_correlation_v1.csv")
+)
+
+knitr::kable(future_correlation, digits = 3)
+```
+
+# Screening ARX dan Spatial Lag
+
+```{r screening-functions}
+score_predictions <- function(observed, predicted) {
+  valid <- is.finite(observed) & is.finite(predicted)
+  tibble(
+    n = sum(valid),
+    rmse = sqrt(mean((observed[valid] - predicted[valid])^2)),
+    mae = mean(abs(observed[valid] - predicted[valid]))
+  )
+}
+
+build_horizon_data <- function(h) {
+  panel %>%
+    arrange(grid_id, month) %>%
+    group_by(grid_id) %>%
+    mutate(
+      target = lead(log_chla_anom, h),
+      target_month = lead(month, h)
+    ) %>%
+    ungroup() %>%
+    transmute(
+      origin_month = month,
+      target_month,
+      grid_id,
+      target,
+      y_t = log_chla_anom,
+      y_lag1 = own_lag1,
+      y_lag12 = own_lag12,
+      w_y_t = w_log_chla_anom,
+      sst_t = sst_anomaly_c,
+      u10_t = u10_anom,
+      v10_t = v10_anom
+    )
+}
+
+screen_horizon <- function(h) {
+  model_data <- build_horizon_data(h) %>%
+    filter(
+      complete.cases(
+        target, y_t, y_lag1, y_lag12, w_y_t,
+        sst_t, u10_t, v10_t
+      )
+    )
+
+  train_data <- model_data %>%
+    filter(target_month <= TRAIN_END)
+
+  validation_data <- model_data %>%
+    filter(
+      target_month >= VALIDATION_START,
+      target_month <= VALIDATION_END
+    )
+
+  arx_model <- lm(
+    target ~ y_t + y_lag1 + y_lag12 + sst_t + u10_t + v10_t + factor(grid_id),
+    data = train_data
+  )
+
+  spatial_model <- lm(
+    target ~ y_t + y_lag1 + y_lag12 + w_y_t + sst_t + u10_t + v10_t + factor(grid_id),
+    data = train_data
+  )
+
+  validation_data <- validation_data %>%
+    mutate(
+      prediction_arx = predict(arx_model, newdata = validation_data),
+      prediction_spatial = predict(spatial_model, newdata = validation_data)
+    )
+
+  metrics <- bind_rows(
+    score_predictions(validation_data$target, validation_data$prediction_arx) %>%
+      mutate(model = "ARX", .before = 1),
+    score_predictions(validation_data$target, validation_data$prediction_spatial) %>%
+      mutate(model = "ARX_spatial", .before = 1)
+  ) %>%
+    mutate(horizon = h, .before = 1)
+
+  predictions <- bind_rows(
+    validation_data %>%
+      transmute(
+        horizon = h,
+        target_month,
+        grid_id,
+        model = "ARX",
+        residual = target - prediction_arx
+      ),
+    validation_data %>%
+      transmute(
+        horizon = h,
+        target_month,
+        grid_id,
+        model = "ARX_spatial",
+        residual = target - prediction_spatial
+      )
+  )
+
+  spatial_coefficient <- broom::tidy(spatial_model) %>%
+    filter(term == "w_y_t") %>%
+    transmute(
+      horizon = h,
+      estimate,
+      std_error = std.error,
+      statistic,
+      p_value = p.value
+    )
+
+  list(
+    metrics = metrics,
+    predictions = predictions,
+    spatial_coefficient = spatial_coefficient
+  )
+}
+```
+
+```{r screening-models}
+screening_results <- map(1:3, screen_horizon)
+
+screening_metrics <- map_dfr(screening_results, "metrics")
+screening_predictions <- map_dfr(screening_results, "predictions")
+spatial_coefficients <- map_dfr(screening_results, "spatial_coefficient")
+
+screening_comparison <- screening_metrics %>%
+  select(horizon, model, rmse, mae) %>%
+  pivot_wider(names_from = model, values_from = c(rmse, mae)) %>%
+  mutate(
+    rmse_gain_percent = 100 * (rmse_ARX - rmse_ARX_spatial) / rmse_ARX,
+    mae_gain_percent = 100 * (mae_ARX - mae_ARX_spatial) / mae_ARX
+  )
+
+write_csv(screening_metrics, file.path(TABLE_DIR, "screening_metrics_v1.csv"))
+write_csv(spatial_coefficients, file.path(TABLE_DIR, "spatial_coefficients_v1.csv"))
+
+knitr::kable(screening_comparison, digits = 4)
+```
+
+# Moran's I Residual Validasi
+
+```{r residual-moran}
+set.seed(20260918)
+
+residual_moran <- screening_predictions %>%
+  group_by(horizon, model, target_month) %>%
+  group_modify(~ moran_one(.x, "residual", nsim = 199)) %>%
+  ungroup()
+
+residual_moran_summary <- residual_moran %>%
+  group_by(horizon, model) %>%
+  summarise(
+    median_moran_i = median(moran_i, na.rm = TRUE),
+    proporsi_positif_signifikan = mean(
+      moran_i > 0 & p_value < 0.05,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+residual_comparison <- residual_moran_summary %>%
+  pivot_wider(
+    names_from = model,
+    values_from = c(median_moran_i, proporsi_positif_signifikan)
+  )
+
+write_csv(residual_moran, file.path(TABLE_DIR, "validation_residual_moran_v1.csv"))
+write_csv(
+  residual_moran_summary,
+  file.path(TABLE_DIR, "validation_residual_moran_summary_v1.csv")
+)
+
+knitr::kable(residual_comparison, digits = 3)
+```
+
+```{r residual-moran-plot, fig.height=7}
+ggplot(residual_moran, aes(target_month, moran_i, colour = model)) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_line(linewidth = 0.5) +
+  facet_wrap(~ horizon, ncol = 1, scales = "free_y") +
+  labs(x = NULL, y = "Moran's I residual", colour = "Model")
+```
+
+# Keputusan Awal
+
+```{r preliminary-decision}
+decision_table <- screening_comparison %>%
+  left_join(residual_comparison, by = "horizon") %>%
+  mutate(
+    spatial_lag_menurunkan_galat =
+      rmse_gain_percent > 0 & mae_gain_percent > 0,
+    spatial_lag_menurunkan_moran_residual =
+      median_moran_i_ARX_spatial < median_moran_i_ARX,
+    keputusan = case_when(
+      spatial_lag_menurunkan_galat & spatial_lag_menurunkan_moran_residual ~
+        "GSTARX layak diuji lebih lanjut",
+      !spatial_lag_menurunkan_galat & !spatial_lag_menurunkan_moran_residual ~
+        "Tidak ada dukungan untuk GSTARX",
+      TRUE ~ "Bukti masih campuran"
+    )
+  )
+
+write_csv(decision_table, file.path(TABLE_DIR, "gstarx_preliminary_decision_v1.csv"))
+knitr::kable(decision_table, digits = 4)
+```
+
+GSTARX diteruskan jika anomali log Chl-a memiliki autokorelasi spasial yang konsisten, spatial lag memperbaiki galat validasi pada sebagian besar horizon, dan Moran's I residual berkurang setelah spatial lag ditambahkan. Jika ketiga bukti tersebut tidak muncul, model temporal tanpa komponen spasial lebih sesuai.
