@@ -2,13 +2,6 @@
 /proposal/
 /full_text/
 
-/data/raw/
-/data/processed/
-/output/
-
-/syntax/rmd/*.html
-/syntax/rmd/*_files/
-
 .venv*/
 __pycache__/
 *.py[cod]

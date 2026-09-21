@@ -1,0 +1,30 @@
+{
+  "script_version": "v1",
+  "created_utc": "2026-09-18T00:38:04.041456+00:00",
+  "period": "2003-01 to 2025-12",
+  "grid_count": 148,
+  "period_count": 276,
+  "row_count": 40848,
+  "model_complete_rows": 39711,
+  "model_complete_fraction": 0.9721650998824912,
+  "chla_missing_rows": 1137,
+  "predictor_missing_rows": 0,
+  "source_files": {
+    "chla": "D:\\thesis\\data\\processed\\chla\\chla_monthly_200301_202512_v1.csv",
+    "sst": "D:\\thesis\\data\\processed\\sst\\sst_monthly_200301_202512_v1.csv",
+    "wind": "D:\\thesis\\data\\processed\\wind\\wind_monthly_200301_202512_v1.csv"
+  },
+  "source_sha256": {
+    "chla": "d72089a217190e0b5c8f24697ffe7894c7b874f9e79b6adaa8662e89c930d2a9",
+    "sst": "2ba4f2b68cf911a9570e40a2c369e91a91443e588a30fb9feeb99855c4d0fb15",
+    "wind": "3bb0169cfc1808489a3dc66a5866b2019c067807c3f7abc26e793a22e8d5b1f9"
+  },
+  "target": "chla_mg_m3",
+  "predictors": [
+    "sst_c",
+    "sst_anomaly_c",
+    "u10_m_s",
+    "v10_m_s"
+  ],
+  "missingness_rule": "Chl-a missing values are retained; no imputation is applied in this step."
+}

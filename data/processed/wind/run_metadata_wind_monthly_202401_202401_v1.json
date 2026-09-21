@@ -1,0 +1,25 @@
+{
+  "script_version": "v1",
+  "created_utc": "2026-09-17T23:53:30.307439+00:00",
+  "dataset": "reanalysis-era5-single-levels-monthly-means",
+  "doi": "10.24381/cds.f17050d7",
+  "start": "2024-01",
+  "end": "2024-01",
+  "periods_requested": 1,
+  "grid_count": 148,
+  "expected_rows": 148,
+  "grid_file": "D:\\thesis\\data\\metadata\\output_grid_target.csv",
+  "grid_sha256": "783ef13c6e3874be896187e7fc6d93e6f2544cb8deb264cf5760f3f20b02318d",
+  "source_resolution": "0.25 degree monthly mean",
+  "source_variables": [
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind"
+  ],
+  "spatial_method": "Nearest ERA5 grid-cell center within 0.126 degree",
+  "requested_area_nwse": [
+    -4.75,
+    102.75,
+    -8.25,
+    107.25
+  ]
+}

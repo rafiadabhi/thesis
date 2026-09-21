@@ -1,0 +1,20 @@
+{
+  "script_version": "v1",
+  "created_utc": "2026-09-17T08:09:25.754887+00:00",
+  "collection": "C3380709133-OB_CLOUD",
+  "product": "MODISA_L3m_CHL",
+  "product_version": "2022.0",
+  "doi": "10.5067/AQUA/MODIS/L3M/CHL/2022.0",
+  "start": "2003-01",
+  "end": "2025-12",
+  "periods_requested": 276,
+  "grid_count": 148,
+  "expected_rows": 40848,
+  "grid_file": "D:\\thesis\\data\\metadata\\output_grid_target.csv",
+  "grid_sha256": "783ef13c6e3874be896187e7fc6d93e6f2544cb8deb264cf5760f3f20b02318d",
+  "source_resolution": "1/24 degree, nominal 4 km",
+  "target_resolution_degree": 0.25,
+  "spatial_method": "cos(latitude)-weighted mean of valid native pixels in each grid",
+  "temporal_method": "official NASA monthly Level-3 composite; no user aggregation of daily files",
+  "missing": "NaN retained when a monthly composite has no valid pixel in a grid"
+}

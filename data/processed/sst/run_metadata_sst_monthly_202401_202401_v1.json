@@ -1,0 +1,18 @@
+{
+  "script_version": "v1",
+  "created_utc": "2026-09-17T08:44:54.779218+00:00",
+  "product": "NOAA OISST v2.1 AVHRR",
+  "doi": "10.25921/RE9P-PT57",
+  "source_base_url": "https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr",
+  "start": "2024-01",
+  "end": "2024-01",
+  "periods_requested": 1,
+  "grid_count": 148,
+  "expected_rows": 148,
+  "grid_file": "D:\\thesis\\data\\metadata\\output_grid_target.csv",
+  "grid_sha256": "783ef13c6e3874be896187e7fc6d93e6f2544cb8deb264cf5760f3f20b02318d",
+  "source_resolution": "0.25 degree daily",
+  "target_resolution": "0.25 degree monthly",
+  "temporal_method": "Arithmetic mean of valid daily OISST values per month",
+  "spatial_method": "Nearest OISST grid-cell center within 0.126 degree"
+}
