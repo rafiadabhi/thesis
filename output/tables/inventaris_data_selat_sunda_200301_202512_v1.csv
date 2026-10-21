@@ -1,0 +1,5 @@
+﻿tahap,grid,periode,unit_waktu,baris,catatan
+0. Grid kandidat (Rmd),148.0,-,-,148.0,"terpilih (selected) = 148, tidak terpilih = 0"
+1. Harian (grid 0.25°),,-,-,,tidak ada chla_daily_*.csv di D:\thesis\data\processed\chla
+2. Bulanan (grid 0.25°),148.0,2003-01 s.d. 2025-12,276 bulan,40848.0,"chl-a tidak NaN 39,711 (97.2%); reliable (>= 25% piksel) 38,803 (95.0%)"
+3. Panel model (+ eksogen),148.0,2003-01 s.d. 2025-12,276 bulan,40848.0,"eksogen: sst_c, u10_m_s, v10_m_s, wind_speed_m_s (lengkap 100.0%)"

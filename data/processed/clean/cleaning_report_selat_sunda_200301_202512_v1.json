@@ -1,0 +1,80 @@
+{
+  "validasi": {
+    "baris": 40848,
+    "grid": 148,
+    "bulan": 276,
+    "duplikat month-grid_id": 0,
+    "panel seimbang": true,
+    "bulan hilang dari rentang": 0,
+    "grid dengan koordinat tidak konsisten": 0,
+    "chla <= 0": 0,
+    "fraksi di luar [0,1]": 0,
+    "n_valid > n_total": 0,
+    "fraksi != n_valid/n_total (selisih > 0.01)": 0,
+    "chla ada tapi n_valid = 0": 0,
+    "chla NaN tapi n_valid > 0": 0
+  },
+  "grid": {
+    "n_rows": 12,
+    "n_cols": 16,
+    "n_sea": 148,
+    "n_coastal": 42
+  },
+  "reliable_share": 0.9499363493928711,
+  "outlier": {
+    "n_flag": 1208,
+    "n_flag_pesisir": 301
+  },
+  "klimatologi": {
+    "n_pasangan": 1776,
+    "n_fallback": 0
+  },
+  "rho_train": 0.5151437263361603,
+  "imputasi": {
+    "observed": 38803,
+    "spatial": 1759,
+    "temporal": 286
+  },
+  "validasi_imputasi_rmse": {
+    "skema penuh": 0.0846,
+    "hanya tetangga": 0.0843,
+    "hanya damped (rho x t-1)": 0.1929,
+    "isi 0 (klimatologi)": 0.2197
+  },
+  "eksogen_missing": {
+    "sst_c": 0.0,
+    "u10_m_s": 0.0,
+    "v10_m_s": 0.0,
+    "wind_speed_m_s": 0.0
+  },
+  "stabilitas": {
+    "tren_log10_per_dekade": -0.009327981291413316,
+    "tren_se_per_dekade": 0.04954362129739022,
+    "mean_anom_train (<= TRAIN_END)": -0.0020976582505587886,
+    "mean_anom_test (> TRAIN_END)": 0.035549419443529566,
+    "mean_anom_sebelum 2022": 0.005308156073895845,
+    "mean_anom_sejak 2022": 0.02893211250703785
+  },
+  "region": "selat_sunda",
+  "tag": "200301_202512_v1",
+  "sumber": "MODIS-Aqua MODISA_L3m_CHL harian 4 km R2022.0, agregasi bulanan grid 0.25 derajat",
+  "config": {
+    "TRAIN_END": "2018-12",
+    "MIN_COVER": 0.25,
+    "GRID_DEG": 0.25,
+    "MIN_CLIM_YEARS": 5,
+    "OUTLIER_Z": 4.0,
+    "MAD_FLOOR": 0.05,
+    "EXCLUDE_OUTLIERS": false
+  },
+  "n_bulan": 276,
+  "n_grid": 148,
+  "orientasi_cube": "axis0=waktu, axis1=lintang naik (row 0 = paling selatan), axis2=bujur naik",
+  "impute_code": {
+    "0": "observed",
+    "1": "spatial",
+    "2": "temporal (rho x t-1)",
+    "3": "climatology",
+    "9": "darat"
+  }
+}
