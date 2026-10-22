@@ -1,0 +1,38 @@
+{
+  "region": "selat_sunda",
+  "tag": "200301_202512_v1",
+  "kandidat": "Usulan A (2016|2020)",
+  "train": [
+    "2003-01",
+    "2016-12"
+  ],
+  "val": [
+    "2017-01",
+    "2020-12"
+  ],
+  "test": [
+    "2021-01",
+    "2025-12"
+  ],
+  "tahun_ekstrem_positif": [
+    2003,
+    2006,
+    2011,
+    2019,
+    2023
+  ],
+  "tahun_ekstrem_negatif": [
+    2016
+  ],
+  "kriteria": {
+    "ada validasi": true,
+    "potong di batas tahun": true,
+    "musim seimbang tiap bagian": true,
+    "ekstrem positif di tiap bagian": true,
+    "train >= 12 tahun": true,
+    "KS maks vs train": 0.259,
+    "proporsi train:val:test": "61:17:22",
+    "kriteria terpenuhi": "5/5"
+  },
+  "catatan": "Jalankan ulang notebook cleaning dengan TRAIN_END = train[1] sebelum pemodelan."
+}

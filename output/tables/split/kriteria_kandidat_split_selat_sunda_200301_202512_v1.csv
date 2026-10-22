@@ -1,0 +1,7 @@
+﻿kandidat,ada validasi,potong di batas tahun,musim seimbang tiap bagian,ekstrem positif di tiap bagian,train >= 12 tahun,KS maks vs train,proporsi train:val:test,kriteria terpenuhi
+Baku 80:20,False,False,False,True,True,0.198,80:0:20,2/5
+Split EDA (s.d. 2018),False,True,True,True,True,0.125,70:0:30,4/5
+Usulan A (2016|2020),True,True,True,True,True,0.259,61:17:22,5/5
+Usulan B (2017|2020),True,True,True,True,True,0.334,65:13:22,5/5
+Usulan C (2015|2019),True,True,True,True,True,0.19,57:17:26,5/5
+Usulan D (2016|2019),True,True,True,True,True,0.28,61:13:26,5/5
